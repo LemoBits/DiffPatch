@@ -1,4 +1,4 @@
-# File Diff Extractor
+# DiffPatch
 
 一个用Rust编写的目录比较工具，可以生成可执行的补丁文件。
 
@@ -15,7 +15,7 @@
 ### Create Patch
 
 ```bash
-file-diff-extractor create --source <源文件目录> --target <目标文件目录> --output <补丁文件名> --check-files <验证文件1,验证文件2,...>
+diffpatch create --source <源文件目录> --target <目标文件目录> --output <补丁文件名> --check-files <验证文件1,验证文件2,...>
 ```
 
 ### Apply Patch
