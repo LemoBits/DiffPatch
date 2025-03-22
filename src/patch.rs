@@ -48,7 +48,12 @@ pub fn create_patch(
     diffs: Vec<DiffType>,
     check_files: Vec<String>,
 ) -> Result<()> {
-    println!("Creating patch file: {}", output_file.display());
+    // Modify output_file to be in the target directory
+    let output_filename = output_file.file_name().ok_or_else(|| anyhow!("Invalid output filename"))?;
+    let target_output_file = target_dir.join(output_filename);
+    
+    println!("Creating patch file in target directory: {}", target_output_file.display());
+    println!("(Instead of the specified output location: {})", output_file.display());
 
     // Create temporary directory to store patch data
     let temp_dir = tempdir().context("Failed to create temporary directory")?;
@@ -103,19 +108,20 @@ pub fn create_patch(
     // Get current executable path
     let current_exe = std::env::current_exe().context("Failed to get current executable path")?;
     
-    // Copy current executable to output file
-    fs::copy(&current_exe, output_file).with_context(|| {
+    // Copy current executable to target directory
+    fs::copy(&current_exe, &target_output_file).with_context(|| {
         format!(
             "Failed to copy executable from {} to {}",
             current_exe.display(),
-            output_file.display()
+            target_output_file.display()
         )
     })?;
 
     // Append patch data and content to the end of executable
-    append_data_to_exe(output_file, &patch_data_path, &zip_path)?;
+    append_data_to_exe(&target_output_file, &patch_data_path, &zip_path)?;
 
-    println!("Patch file created successfully: {}", output_file.display());
+    println!("Patch file created successfully:");
+    println!("  Location: {}", target_output_file.display());
     println!("File statistics:");
     println!("  Added: {} files", patch_data.added_files.len());
     println!("  Modified: {} files", patch_data.modified_files.len());
