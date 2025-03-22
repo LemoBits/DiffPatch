@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "A tool to compare directories and create executable patches"
 authors = ["Melaton"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/LemoBits/DiffPatch"
+keywords = ["diff", "patch", "file-comparison", "executable-patch"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 walkdir = "2.4.0"
