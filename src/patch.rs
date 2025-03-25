@@ -50,7 +50,16 @@ pub fn create_patch(
 ) -> Result<()> {
     // Modify output_file to be in the target directory
     let output_filename = output_file.file_name().ok_or_else(|| anyhow!("Invalid output filename"))?;
-    let target_output_file = target_dir.join(output_filename);
+    
+    // Check if output filename has .exe extension, if not, add it
+    let output_filename_str = output_filename.to_string_lossy();
+    let output_filename_with_exe = if !output_filename_str.ends_with(".exe") {
+        format!("{}.exe", output_filename_str)
+    } else {
+        output_filename_str.to_string()
+    };
+    
+    let target_output_file = target_dir.join(output_filename_with_exe);
     
     println!("Creating patch file in target directory: {}", target_output_file.display());
     println!("(Instead of the specified output location: {})", output_file.display());
