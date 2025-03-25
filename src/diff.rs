@@ -3,11 +3,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 use rayon::prelude::*;
-use std::sync::{Arc, Mutex};
 use std::env;
 
 // Optional thread count control
