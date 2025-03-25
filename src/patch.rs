@@ -168,7 +168,7 @@ fn create_zip_archive(source_dir: &Path, zip_path: &Path) -> Result<()> {
     let file = File::create(zip_path).context("Failed to create zip file")?;
     let writer = BufWriter::new(file);
     let mut zip = ZipWriter::new(writer);
-    let options = FileOptions::default()
+    let options = FileOptions::<()>::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o755);
 
