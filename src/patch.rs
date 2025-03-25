@@ -79,7 +79,6 @@ pub fn create_patch(
     let target_output_file = target_dir.join(output_filename_with_exe);
     
     println!("Creating patch file in target directory: {}", target_output_file.display());
-    println!("(Instead of the specified output location: {})", output_file.display());
 
     // Create temporary directory to store patch data
     let temp_dir = tempdir().context("Failed to create temporary directory")?;
