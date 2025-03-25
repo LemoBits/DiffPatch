@@ -3,8 +3,30 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
+use std::env;
+
+// Optional thread count control
+lazy_static::lazy_static! {
+    static ref IO_THREADS: usize = {
+        match env::var("DIFFPATCH_IO_THREADS") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                // Default to a reasonable number based on available CPUs
+                // For I/O bound operations, using too many threads can hurt performance
+                let cpus = num_cpus::get();
+                std::cmp::min(cpus, 4) // Limit to 4 or CPU count, whichever is smaller
+            }),
+            Err(_) => {
+                let cpus = num_cpus::get();
+                std::cmp::min(cpus, 4)
+            }
+        }
+    };
+}
 
 /// File information structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,13 +44,16 @@ pub enum DiffType {
     Removed(PathBuf),   // Removed file
 }
 
-/// Calculate SHA256 hash of a file
+/// Calculate SHA256 hash of a file with buffered reading
 pub fn calculate_file_hash(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)
+    let file = fs::File::open(path)
         .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
     
+    // Use a buffered reader for better I/O performance
+    let mut reader = BufReader::with_capacity(65536, file); // 64KB buffer
+    
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
+    std::io::copy(&mut reader, &mut hasher)
         .with_context(|| format!("Failed to read file for hashing: {}", path.display()))?;
     
     let hash = hasher.finalize();
@@ -79,50 +104,78 @@ pub fn scan_directory(
     exclude_extensions: Option<&[String]>, 
     exclude_dirs: Option<&[String]>
 ) -> Result<HashMap<PathBuf, FileInfo>> {
-    let mut files = HashMap::new();
-    
-    for entry in WalkDir::new(dir_path)
+    // Collect all valid files first
+    let files_to_process: Vec<_> = WalkDir::new(dir_path)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file()) {
-            
-        let full_path = entry.path();
-        let relative_path = full_path.strip_prefix(dir_path)
-            .unwrap_or_else(|_| Path::new(""))
-            .to_path_buf();
-            
-        // Skip hidden files and directories
-        if relative_path.components().any(|c| {
-            if let Some(s) = c.as_os_str().to_str() {
-                s.starts_with('.')
-            } else {
-                false
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            let full_path = e.path();
+            let relative_path = full_path.strip_prefix(dir_path)
+                .unwrap_or_else(|_| Path::new(""))
+                .to_path_buf();
+                
+            // Skip hidden files and directories
+            if relative_path.components().any(|c| {
+                if let Some(s) = c.as_os_str().to_str() {
+                    s.starts_with('.')
+                } else {
+                    false
+                }
+            }) {
+                return false;
             }
-        }) {
-            continue;
-        }
-        
-        // Skip files based on exclude patterns
-        if should_exclude(&relative_path, exclude_extensions, exclude_dirs) {
-            continue;
-        }
-        
-        let metadata = fs::metadata(full_path)
-            .with_context(|| format!("Failed to get metadata for: {}", full_path.display()))?;
             
-        let hash = calculate_file_hash(full_path)?;
-        
-        files.insert(
-            relative_path.clone(),
-            FileInfo {
-                relative_path,
-                hash,
-                size: metadata.len(),
-            },
-        );
+            // Skip files based on exclude patterns
+            !should_exclude(&relative_path, exclude_extensions, exclude_dirs)
+        })
+        .collect();
+    
+    // Create a thread pool with limited threads to avoid I/O contention
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(*IO_THREADS)
+        .build()
+        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+    
+    // Process files in parallel with the custom thread pool
+    let results = pool.install(|| {
+        files_to_process.par_iter().map(|entry| {
+            let full_path = entry.path();
+            let relative_path = match full_path.strip_prefix(dir_path) {
+                Ok(path) => path.to_path_buf(),
+                Err(_) => return None,
+            };
+            
+            // Get metadata
+            let metadata = match fs::metadata(full_path) {
+                Ok(meta) => meta,
+                Err(_) => return None,
+            };
+            
+            // Calculate hash
+            let hash = match calculate_file_hash(full_path) {
+                Ok(h) => h,
+                Err(_) => return None,
+            };
+            
+            Some((
+                relative_path.clone(),
+                FileInfo {
+                    relative_path,
+                    hash,
+                    size: metadata.len(),
+                }
+            ))
+        }).collect::<Vec<_>>()
+    });
+    
+    // Add results to HashMap
+    let mut files_map = HashMap::with_capacity(results.len());
+    for result in results.into_iter().flatten() {
+        files_map.insert(result.0, result.1);
     }
     
-    Ok(files)
+    Ok(files_map)
 }
 
 /// Compare two directories and find file differences

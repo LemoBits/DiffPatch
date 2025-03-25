@@ -11,7 +11,7 @@ use utils::{check_is_directory, check_path_exists};
 fn main() -> Result<()> {
     // Check if running in patch mode
     if is_patch_executable() {
-        println!("Running in patch mode...");
+        println!("Running in patch mode with parallel processing...");
         let current_dir = env::current_dir().context("Failed to get current directory")?;
         return patch::apply_patch(&current_dir);
     }
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
             }
             
             // Create patch
-            println!("Comparing directories {} and {}", source.display(), target.display());
+            println!("Comparing directories {} and {} using parallel processing", source.display(), target.display());
             let diffs = diff::compare_directories(&source, &target, exclude_extensions.as_deref(), exclude_dirs.as_deref())?;
             
             if diffs.is_empty() {

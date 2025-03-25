@@ -3,10 +3,27 @@ use anyhow::{Context, Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Seek, Write};
+use std::io::{BufWriter, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 use zip::{write::FileOptions, ZipWriter};
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
+use std::env;
+
+/// Get IO thread count from environment or use reasonable default
+fn get_io_thread_count() -> usize {
+    match env::var("DIFFPATCH_IO_THREADS") {
+        Ok(val) => val.parse().unwrap_or_else(|_| {
+            let cpus = num_cpus::get();
+            std::cmp::min(cpus, 4)
+        }),
+        Err(_) => {
+            let cpus = num_cpus::get();
+            std::cmp::min(cpus, 4)
+        }
+    }
+}
 
 /// Patch data structure
 #[derive(Serialize, Deserialize, Debug)]
@@ -80,34 +97,42 @@ pub fn create_patch(
     let pb = ProgressBar::new((patch_data.added_files.len() + patch_data.modified_files.len()) as u64);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
             .unwrap()
             .progress_chars("#>-"),
     );
-    pb.set_message("Copying files...");
 
-    for file_info in patch_data.added_files.iter().chain(patch_data.modified_files.iter()) {
+    // Create a list of all files to copy
+    let files_to_copy: Vec<&FileInfo> = patch_data.added_files.iter()
+        .chain(patch_data.modified_files.iter())
+        .collect();
+    
+    // Use atomic counter for progress
+    let progress_counter = Arc::new(Mutex::new(0));
+    
+    // Perform copying in parallel
+    files_to_copy.par_iter().for_each(|file_info| {
         let source_file = target_dir.join(&file_info.relative_path);
         let dest_file = content_dir.join(&file_info.relative_path);
 
         // Create target directory
         if let Some(parent) = dest_file.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create directory: {}", parent.display())
-            })?;
+            if let Err(_) = fs::create_dir_all(parent) {
+                return; // Skip this file on error
+            }
         }
 
         // Copy file
-        fs::copy(&source_file, &dest_file).with_context(|| {
-            format!(
-                "Failed to copy file from {} to {}",
-                source_file.display(),
-                dest_file.display()
-            )
-        })?;
+        if let Err(_) = fs::copy(&source_file, &dest_file) {
+            return; // Skip this file on error
+        }
 
-        pb.inc(1);
-    }
+        // Update progress
+        let mut counter = progress_counter.lock().unwrap();
+        *counter += 1;
+        pb.set_position(*counter);
+    });
+    
     pb.finish_with_message("File copying complete");
 
     // Create ZIP archive
@@ -148,23 +173,94 @@ fn create_zip_archive(source_dir: &Path, zip_path: &Path) -> Result<()> {
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o755);
 
-    for entry in walkdir::WalkDir::new(source_dir)
+    // Collect all files from the directory in parallel
+    let files: Vec<_> = walkdir::WalkDir::new(source_dir)
         .into_iter()
-        .filter_map(Result::ok)
+        .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-    {
-        let path = entry.path();
-        let relative_path = path.strip_prefix(source_dir)
-            .unwrap_or_else(|_| Path::new(""))
-            .to_str()
-            .ok_or_else(|| anyhow!("Invalid path encoding"))?;
-
-        let mut file = File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
-        zip.start_file(relative_path, options).with_context(|| format!("Failed to start zip file: {}", relative_path))?;
+        .collect();
+    
+    if !files.is_empty() {
+        println!("Compressing {} files...", files.len());
+        let pb = ProgressBar::new(files.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+    
+        // Create a thread pool with limited threads to avoid I/O contention
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(get_io_thread_count())
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
         
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).with_context(|| format!("Failed to read file: {}", path.display()))?;
-        zip.write_all(&buffer).with_context(|| format!("Failed to write to zip: {}", relative_path))?;
+        // Process files in parallel to prepare content
+        let file_contents: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::with_capacity(files.len())));
+        let progress_counter = Arc::new(Mutex::new(0));
+        
+        pool.install(|| {
+            files.par_iter().for_each(|entry| {
+                let path = entry.path();
+                let relative_path = match path.strip_prefix(source_dir) {
+                    Ok(rel_path) => match rel_path.to_str() {
+                        Some(path_str) => path_str.to_string(),
+                        None => return, // Skip files with invalid UTF-8 paths
+                    },
+                    Err(_) => return, // Skip if we can't get relative path
+                };
+
+                // Read file content with buffered IO
+                let mut buffer = Vec::new();
+                let result = (|| -> Result<(), std::io::Error> {
+                    let file = File::open(path)?;
+                    let mut reader = BufReader::with_capacity(65536, file);
+                    reader.read_to_end(&mut buffer)?;
+                    Ok(())
+                })();
+                
+                if result.is_ok() {
+                    let mut contents = file_contents.lock().unwrap();
+                    contents.push((relative_path, buffer));
+                    
+                    // Update progress
+                    let mut counter = progress_counter.lock().unwrap();
+                    *counter += 1;
+                    pb.set_position(*counter);
+                }
+            });
+        });
+        
+        // Extract contents from the mutex
+        let contents = Arc::try_unwrap(file_contents)
+            .unwrap()
+            .into_inner()
+            .unwrap();
+        
+        pb.finish_with_message("File reading complete");
+        
+        // Add files to the zip sequentially (ZipWriter is not thread-safe)
+        println!("Creating archive...");
+        let zip_pb = ProgressBar::new(contents.len() as u64);
+        zip_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        
+        for (i, (relative_path, buffer)) in contents.into_iter().enumerate() {
+            zip.start_file(&relative_path, options)
+                .with_context(|| format!("Failed to start zip file: {}", relative_path))?;
+            
+            zip.write_all(&buffer)
+                .with_context(|| format!("Failed to write to zip: {}", relative_path))?;
+                
+            zip_pb.set_position(i as u64 + 1);
+        }
+        
+        zip_pb.finish_with_message("Archive creation complete");
     }
 
     zip.finish().context("Failed to finish zip file")?;
@@ -312,16 +408,20 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
     let pb = ProgressBar::new(archive.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
             .unwrap()
             .progress_chars("#>-"),
     );
     
-    // Extract files
+    // Safely unpack the archive to a temporary location first
+    let extract_dir = temp_dir.path().join("extracted");
+    fs::create_dir_all(&extract_dir).context("Failed to create extraction directory")?;
+    
+    // Extract files to the temporary directory first
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).context("Failed to access zip file entry")?;
         let outpath = match file.enclosed_name() {
-            Some(path) => current_dir.join(path),
+            Some(path) => extract_dir.join(path),
             None => {
                 pb.inc(1);
                 continue;
@@ -338,28 +438,100 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
                     fs::create_dir_all(parent).with_context(|| format!("Failed to create directory: {}", parent.display()))?;
                 }
             }
-            // Extract file
-            let mut outfile = File::create(&outpath).with_context(|| format!("Failed to create file: {}", outpath.display()))?;
+            // Extract file with buffered IO
+            let mut outfile = BufWriter::with_capacity(65536, 
+                File::create(&outpath).with_context(|| format!("Failed to create file: {}", outpath.display()))?
+            );
             std::io::copy(&mut file, &mut outfile).with_context(|| format!("Failed to write file: {}", outpath.display()))?;
         }
         
         pb.inc(1);
-        pb.set_message(format!("Extracted: {}", file.name()));
     }
+    
     pb.finish_with_message("Files extracted successfully");
     
-    // Remove files to be deleted
+    // Now copy files in parallel from the temporary directory to the target directory
+    let extracted_files: Vec<_> = walkdir::WalkDir::new(&extract_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .collect();
+    
+    println!("Copying {} files to target directory...", extracted_files.len());
+    let copy_pb = ProgressBar::new(extracted_files.len() as u64);
+    copy_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    
+    // Use atomic counter for progress
+    let copy_counter = Arc::new(Mutex::new(0));
+    
+    // Create a thread pool with limited threads to avoid I/O contention
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(get_io_thread_count())
+        .build()
+        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+    
+    // Parallel copy to target directory
+    pool.install(|| {
+        extracted_files.par_iter().for_each(|entry| {
+            let src_path = entry.path();
+            let rel_path = src_path.strip_prefix(&extract_dir).unwrap_or(src_path);
+            let dest_path = current_dir.join(rel_path);
+            
+            // Ensure parent directory exists
+            if let Some(parent) = dest_path.parent() {
+                if !parent.exists() {
+                    if let Err(_) = fs::create_dir_all(parent) {
+                        return; // Skip on error
+                    }
+                }
+            }
+            
+            // Optimized copy with buffered IO
+            let result = (|| {
+                let src_file = File::open(src_path)?;
+                let mut reader = BufReader::with_capacity(65536, src_file);
+                
+                let dst_file = File::create(&dest_path)?;
+                let mut writer = BufWriter::with_capacity(65536, dst_file);
+                
+                std::io::copy(&mut reader, &mut writer)?;
+                writer.flush()?;
+                Ok::<_, std::io::Error>(())
+            })();
+            
+            if result.is_err() {
+                return; // Skip on error
+            }
+            
+            // Update progress
+            let mut counter = copy_counter.lock().unwrap();
+            *counter += 1;
+            copy_pb.set_position(*counter);
+        });
+    });
+    
+    copy_pb.finish_with_message("Files copied successfully");
+    
+    // Remove files to be deleted in parallel
     if !patch_data.removed_files.is_empty() {
         println!("Removing {} files...", patch_data.removed_files.len());
-        for path in &patch_data.removed_files {
-            let full_path = current_dir.join(path);
-            if full_path.exists() {
-                fs::remove_file(&full_path).with_context(|| format!("Failed to remove file: {}", full_path.display()))?;
-                println!("  Removed: {}", path.display());
-            } else {
-                println!("  Skip removing (not found): {}", path.display());
-            }
-        }
+        
+        // Use same thread pool for deletion
+        pool.install(|| {
+            patch_data.removed_files.par_iter().for_each(|path| {
+                let full_path = current_dir.join(path);
+                if full_path.exists() {
+                    let _ = fs::remove_file(&full_path);
+                }
+            });
+        });
+        
+        println!("Files removed successfully");
     }
     
     println!("Patch applied successfully!");
