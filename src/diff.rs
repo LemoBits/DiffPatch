@@ -35,8 +35,50 @@ pub fn calculate_file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hash))
 }
 
+/// Check if a file should be excluded based on exclude patterns
+fn should_exclude(
+    path: &Path, 
+    exclude_extensions: Option<&[String]>, 
+    exclude_dirs: Option<&[String]>
+) -> bool {
+    // Check if path has an excluded extension
+    if let Some(extensions) = exclude_extensions {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let dot_ext = format!(".{}", ext);
+            if extensions.iter().any(|e| e == &dot_ext || e == ext) {
+                return true;
+            }
+        }
+    }
+    
+    // Check if path is in an excluded directory
+    if let Some(dirs) = exclude_dirs {
+        let path_str = path.display().to_string();
+        for dir in dirs {
+            // Convert dir string into platform-specific path format
+            let platform_dir = if cfg!(windows) {
+                dir.replace('/', "\\")
+            } else {
+                dir.replace('\\', "/")
+            };
+            
+            // Check if path contains the excluded directory
+            if path_str.contains(&format!("{}{}", platform_dir, std::path::MAIN_SEPARATOR)) ||
+               path_str.ends_with(&platform_dir) {
+                return true;
+            }
+        }
+    }
+    
+    false
+}
+
 /// Scan directory and collect file information
-pub fn scan_directory(dir_path: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
+pub fn scan_directory(
+    dir_path: &Path, 
+    exclude_extensions: Option<&[String]>, 
+    exclude_dirs: Option<&[String]>
+) -> Result<HashMap<PathBuf, FileInfo>> {
     let mut files = HashMap::new();
     
     for entry in WalkDir::new(dir_path)
@@ -60,6 +102,11 @@ pub fn scan_directory(dir_path: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
             continue;
         }
         
+        // Skip files based on exclude patterns
+        if should_exclude(&relative_path, exclude_extensions, exclude_dirs) {
+            continue;
+        }
+        
         let metadata = fs::metadata(full_path)
             .with_context(|| format!("Failed to get metadata for: {}", full_path.display()))?;
             
@@ -79,12 +126,17 @@ pub fn scan_directory(dir_path: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
 }
 
 /// Compare two directories and find file differences
-pub fn compare_directories(source_dir: &Path, target_dir: &Path) -> Result<Vec<DiffType>> {
+pub fn compare_directories(
+    source_dir: &Path, 
+    target_dir: &Path, 
+    exclude_extensions: Option<&[String]>, 
+    exclude_dirs: Option<&[String]>
+) -> Result<Vec<DiffType>> {
     println!("Scanning source directory: {}", source_dir.display());
-    let source_files = scan_directory(source_dir)?;
+    let source_files = scan_directory(source_dir, exclude_extensions, exclude_dirs)?;
     
     println!("Scanning target directory: {}", target_dir.display());
-    let target_files = scan_directory(target_dir)?;
+    let target_files = scan_directory(target_dir, exclude_extensions, exclude_dirs)?;
     
     let mut diffs = Vec::new();
     

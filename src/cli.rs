@@ -28,6 +28,14 @@ pub enum Commands {
         /// Verification file list (comma-separated relative paths)
         #[arg(short, long, value_name = "FILES", value_delimiter = ',')]
         check_files: Vec<String>,
+
+        /// Exclude file extensions (comma-separated, e.g., .tmp,.bak,.log)
+        #[arg(long, value_name = "EXTENSIONS", value_delimiter = ',')]
+        exclude_extensions: Option<Vec<String>>,
+
+        /// Exclude directories (comma-separated relative paths, e.g., node_modules,dist,target)
+        #[arg(long, value_name = "DIRECTORIES", value_delimiter = ',')]
+        exclude_dirs: Option<Vec<String>>,
     },
 
     /// Apply patch (typically called by the generated patch program)

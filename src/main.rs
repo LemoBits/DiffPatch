@@ -25,6 +25,8 @@ fn main() -> Result<()> {
             target,
             output,
             check_files,
+            exclude_extensions,
+            exclude_dirs,
         } => {
             // Validate arguments
             check_path_exists(&source, "Source directory").context("Source directory check failed")?;
@@ -33,9 +35,28 @@ fn main() -> Result<()> {
             check_path_exists(&target, "Target directory").context("Target directory check failed")?;
             check_is_directory(&target).context("Target directory check failed")?;
             
+            // Display exclude patterns if specified
+            if let Some(exts) = &exclude_extensions {
+                if !exts.is_empty() {
+                    println!("Excluding file extensions:");
+                    for ext in exts {
+                        println!("  - {}", ext);
+                    }
+                }
+            }
+            
+            if let Some(dirs) = &exclude_dirs {
+                if !dirs.is_empty() {
+                    println!("Excluding directories:");
+                    for dir in dirs {
+                        println!("  - {}", dir);
+                    }
+                }
+            }
+            
             // Create patch
             println!("Comparing directories {} and {}", source.display(), target.display());
-            let diffs = diff::compare_directories(&source, &target)?;
+            let diffs = diff::compare_directories(&source, &target, exclude_extensions.as_deref(), exclude_dirs.as_deref())?;
             
             if diffs.is_empty() {
                 println!("No differences found, no need to create a patch.");
