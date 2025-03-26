@@ -27,6 +27,7 @@ fn main() -> Result<()> {
             check_files,
             exclude_extensions,
             exclude_dirs,
+            use_diff_patches,
         } => {
             // Validate arguments
             check_path_exists(&source, "Source directory").context("Source directory check failed")?;
@@ -54,9 +55,14 @@ fn main() -> Result<()> {
                 }
             }
             
+            // Display if using diff patches
+            if use_diff_patches {
+                println!("Using difference patches for modified files to reduce patch size");
+            }
+            
             // Create patch
             println!("Comparing directories {} and {} using parallel processing", source.display(), target.display());
-            let diffs = diff::compare_directories(&source, &target, exclude_extensions.as_deref(), exclude_dirs.as_deref())?;
+            let diffs = diff::compare_directories(&source, &target, exclude_extensions.as_deref(), exclude_dirs.as_deref(), use_diff_patches)?;
             
             if diffs.is_empty() {
                 println!("No differences found, no need to create a patch.");
@@ -65,11 +71,15 @@ fn main() -> Result<()> {
             
             let add_count = diffs.iter().filter(|d| matches!(d, diff::DiffType::Added(_))).count();
             let mod_count = diffs.iter().filter(|d| matches!(d, diff::DiffType::Modified(_))).count();
+            let mod_diff_count = diffs.iter().filter(|d| matches!(d, diff::DiffType::ModifiedDiff(_))).count();
             let del_count = diffs.iter().filter(|d| matches!(d, diff::DiffType::Removed(_))).count();
             
             println!("Found {} file differences:", diffs.len());
             println!("  Added: {} files", add_count);
-            println!("  Modified: {} files", mod_count);
+            println!("  Modified (full files): {} files", mod_count);
+            if use_diff_patches {
+                println!("  Modified (diff patches): {} files", mod_diff_count);
+            }
             println!("  Deleted: {} files", del_count);
             
             // Check verification file list

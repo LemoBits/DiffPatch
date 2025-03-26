@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 use rayon::prelude::*;
 use std::env;
+use similar::TextDiff;
 
 // Optional thread count control
 lazy_static::lazy_static! {
@@ -36,11 +37,39 @@ pub struct FileInfo {
 }
 
 /// File difference types
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DiffType {
     Added(FileInfo),    // Added file
-    Modified(FileInfo), // Modified file
+    Modified(FileInfo), // Modified file with full content
+    ModifiedDiff(FileDiff), // Modified file with only the differences
     Removed(PathBuf),   // Removed file
+}
+
+/// Structure to hold file differences
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiff {
+    pub relative_path: PathBuf,
+    pub hash: String, // hash of target file
+    pub original_hash: String, // hash of source file
+    pub changes: Vec<DiffChange>, // changes to apply
+}
+
+/// Structure to represent a single change in a file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffChange {
+    pub tag: DiffChangeTag,
+    pub content: String,
+    pub old_range: Option<(usize, usize)>, // start line, length
+    pub new_range: Option<(usize, usize)>, // start line, length
+}
+
+/// Tags to represent different types of changes
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DiffChangeTag {
+    Equal,
+    Delete,
+    Insert,
+    Replace,
 }
 
 /// Calculate SHA256 hash of a file with buffered reading
@@ -177,12 +206,88 @@ pub fn scan_directory(
     Ok(files_map)
 }
 
+/// Calculate file differences between two files
+pub fn calculate_file_diff(source_path: &Path, target_path: &Path, relative_path: &Path) -> Result<FileDiff> {
+    // Read source file content
+    let mut source_content = String::new();
+    let mut source_file = fs::File::open(source_path)
+        .with_context(|| format!("Failed to open source file for diff: {}", source_path.display()))?;
+    source_file.read_to_string(&mut source_content)
+        .with_context(|| format!("Failed to read source file for diff: {}", source_path.display()))?;
+    
+    // Read target file content
+    let mut target_content = String::new();
+    let mut target_file = fs::File::open(target_path)
+        .with_context(|| format!("Failed to open target file for diff: {}", target_path.display()))?;
+    target_file.read_to_string(&mut target_content)
+        .with_context(|| format!("Failed to read target file for diff: {}", target_path.display()))?;
+    
+    // Calculate hashes
+    let source_hash = calculate_file_hash(source_path)?;
+    let target_hash = calculate_file_hash(target_path)?;
+    
+    // Calculate diff
+    let diff = TextDiff::from_lines(&source_content, &target_content);
+    
+    let mut changes = Vec::new();
+    
+    for group in diff.grouped_ops(3).iter() {
+        for op in group {
+            // Use the operations directly instead of iter_inline_changes
+            let (old_start, old_len) = (op.old_range().start, op.old_range().len());
+            let (new_start, new_len) = (op.new_range().start, op.new_range().len());
+            
+            // Get old and new slices
+            let old_lines: Vec<&str> = source_content.lines().skip(old_start).take(old_len).collect();
+            let new_lines: Vec<&str> = target_content.lines().skip(new_start).take(new_len).collect();
+            
+            // Create changes based on operation type
+            if old_len > 0 && new_len > 0 {
+                // Replace
+                changes.push(DiffChange {
+                    tag: DiffChangeTag::Replace,
+                    content: new_lines.join("\n"),
+                    old_range: Some((old_start, old_len)),
+                    new_range: Some((new_start, new_len)),
+                });
+            } else if old_len > 0 {
+                // Delete
+                changes.push(DiffChange {
+                    tag: DiffChangeTag::Delete,
+                    content: old_lines.join("\n"),
+                    old_range: Some((old_start, old_len)),
+                    new_range: None,
+                });
+            } else if new_len > 0 {
+                // Insert
+                changes.push(DiffChange {
+                    tag: DiffChangeTag::Insert, 
+                    content: new_lines.join("\n"),
+                    old_range: None,
+                    new_range: Some((new_start, new_len)),
+                });
+            }
+        }
+    }
+    
+    // Create the file diff structure
+    let file_diff = FileDiff {
+        relative_path: relative_path.to_path_buf(),
+        hash: target_hash,
+        original_hash: source_hash,
+        changes,
+    };
+    
+    Ok(file_diff)
+}
+
 /// Compare two directories and find file differences
 pub fn compare_directories(
     source_dir: &Path, 
     target_dir: &Path, 
     exclude_extensions: Option<&[String]>, 
-    exclude_dirs: Option<&[String]>
+    exclude_dirs: Option<&[String]>,
+    use_diff_patches: bool, // Add parameter to control whether to use diff patches
 ) -> Result<Vec<DiffType>> {
     println!("Scanning source directory: {}", source_dir.display());
     let source_files = scan_directory(source_dir, exclude_extensions, exclude_dirs)?;
@@ -197,7 +302,25 @@ pub fn compare_directories(
         match source_files.get(path) {
             Some(source_info) => {
                 if source_info.hash != target_info.hash {
-                    diffs.push(DiffType::Modified(target_info.clone()));
+                    if use_diff_patches {
+                        // Check if it's a text file that we can diff
+                        let source_path = source_dir.join(path);
+                        let target_path = target_dir.join(path);
+                        
+                        // Try to create a diff
+                        match calculate_file_diff(&source_path, &target_path, path) {
+                            Ok(file_diff) => {
+                                diffs.push(DiffType::ModifiedDiff(file_diff));
+                            },
+                            Err(_) => {
+                                // If diff fails (e.g., binary file), fall back to full file
+                                diffs.push(DiffType::Modified(target_info.clone()));
+                            }
+                        }
+                    } else {
+                        // Use full file mode
+                        diffs.push(DiffType::Modified(target_info.clone()));
+                    }
                 }
             },
             None => {

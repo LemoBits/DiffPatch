@@ -1,4 +1,4 @@
-use crate::diff::{DiffType, FileInfo};
+use crate::diff::{DiffType, FileInfo, FileDiff, DiffChangeTag};
 use anyhow::{Context, Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ pub struct PatchData {
     pub check_files: Vec<String>,
     pub added_files: Vec<FileInfo>,
     pub modified_files: Vec<FileInfo>,
+    pub modified_diffs: Vec<FileDiff>,
     pub removed_files: Vec<PathBuf>,
 }
 
@@ -38,12 +39,14 @@ impl PatchData {
     pub fn from_diffs(diffs: Vec<DiffType>, check_files: Vec<String>) -> Self {
         let mut added_files = Vec::new();
         let mut modified_files = Vec::new();
+        let mut modified_diffs = Vec::new();
         let mut removed_files = Vec::new();
 
         for diff in diffs {
             match diff {
                 DiffType::Added(file_info) => added_files.push(file_info),
                 DiffType::Modified(file_info) => modified_files.push(file_info),
+                DiffType::ModifiedDiff(file_diff) => modified_diffs.push(file_diff),
                 DiffType::Removed(path) => removed_files.push(path),
             }
         }
@@ -52,6 +55,7 @@ impl PatchData {
             check_files,
             added_files,
             modified_files,
+            modified_diffs,
             removed_files,
         }
     }
@@ -449,6 +453,117 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
     
     pb.finish_with_message("Files extracted successfully");
     
+    // Process diff patch files
+    if !patch_data.modified_diffs.is_empty() {
+        println!("Applying {} file diffs...", patch_data.modified_diffs.len());
+        let diff_pb = ProgressBar::new(patch_data.modified_diffs.len() as u64);
+        diff_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        
+        // Apply diff patches one by one (no need for parallelization as each file patch operation is already fast)
+        for file_diff in patch_data.modified_diffs.iter() {
+            let file_path = current_dir.join(&file_diff.relative_path);
+            
+            // Check if file exists
+            if !file_path.exists() {
+                diff_pb.inc(1);
+                continue;
+            }
+            
+            // Read current file content
+            let mut content = String::new();
+            if let Ok(mut file) = File::open(&file_path) {
+                if file.read_to_string(&mut content).is_err() {
+                    // Skip if unable to read file (e.g., binary file)
+                    diff_pb.inc(1);
+                    continue;
+                }
+            } else {
+                diff_pb.inc(1);
+                continue;
+            }
+            
+            // Split file content into lines
+            let mut lines: Vec<String> = content.lines().map(|s| s.to_owned()).collect();
+            
+            // Apply changes
+            // Apply changes from back to front, so line numbers aren't affected by insertions/deletions
+            let mut sorted_changes = file_diff.changes.clone();
+            sorted_changes.sort_by(|a, b| {
+                let a_line = a.old_range.map(|(start, _)| start).unwrap_or(usize::MAX);
+                let b_line = b.old_range.map(|(start, _)| start).unwrap_or(usize::MAX);
+                b_line.cmp(&a_line)
+            });
+            
+            for change in sorted_changes {
+                match change.tag {
+                    DiffChangeTag::Delete => {
+                        if let Some((start, len)) = change.old_range {
+                            // Ensure within range
+                            if start < lines.len() {
+                                let end = std::cmp::min(start + len, lines.len());
+                                lines.drain(start..end);
+                            }
+                        }
+                    },
+                    DiffChangeTag::Insert => {
+                        if let Some((start, _)) = change.new_range {
+                            // Ensure within range
+                            if start <= lines.len() {
+                                let new_lines: Vec<String> = change.content.lines().map(|s| s.to_owned()).collect();
+                                for (i, line) in new_lines.into_iter().enumerate() {
+                                    lines.insert(start + i, line);
+                                }
+                            }
+                        }
+                    },
+                    DiffChangeTag::Equal => {
+                        // No changes needed for equal parts
+                    },
+                    DiffChangeTag::Replace => {
+                        // Replace operation: delete first, then insert
+                        if let Some((start, len)) = change.old_range {
+                            if start < lines.len() {
+                                let end = std::cmp::min(start + len, lines.len());
+                                lines.drain(start..end);
+                            }
+                        }
+                        if let Some((start, _)) = change.new_range {
+                            if start <= lines.len() {
+                                let new_lines: Vec<String> = change.content.lines().map(|s| s.to_owned()).collect();
+                                for (i, line) in new_lines.into_iter().enumerate() {
+                                    if start + i <= lines.len() {
+                                        lines.insert(start + i, line);
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+            
+            // Recombine file content
+            let new_content = lines.join("\n");
+            
+            // Write back to file
+            if let Ok(mut file) = File::create(&file_path) {
+                if file.write_all(new_content.as_bytes()).is_err() {
+                    // Skip on write error
+                    diff_pb.inc(1);
+                    continue;
+                }
+            }
+            
+            diff_pb.inc(1);
+        }
+        
+        diff_pb.finish_with_message("File diffs applied successfully");
+    }
+    
     // Now copy files in parallel from the temporary directory to the target directory
     let extracted_files: Vec<_> = walkdir::WalkDir::new(&extract_dir)
         .into_iter()
@@ -536,7 +651,8 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
     println!("Patch applied successfully!");
     println!("Summary:");
     println!("  Added files: {}", patch_data.added_files.len());
-    println!("  Modified files: {}", patch_data.modified_files.len());
+    println!("  Modified files (full): {}", patch_data.modified_files.len());
+    println!("  Modified files (diff): {}", patch_data.modified_diffs.len());
     println!("  Removed files: {}", patch_data.removed_files.len());
     
     Ok(())

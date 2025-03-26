@@ -36,6 +36,10 @@ pub enum Commands {
         /// Exclude directories (comma-separated relative paths, e.g., node_modules,dist,target)
         #[arg(long, value_name = "DIRECTORIES", value_delimiter = ',')]
         exclude_dirs: Option<Vec<String>>,
+        
+        /// Use file difference patches instead of storing full files (default: false)
+        #[arg(long, default_value = "false")]
+        use_diff_patches: bool,
     },
 
     /// Apply patch (typically called by the generated patch program)
