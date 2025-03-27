@@ -38,7 +38,7 @@ pub enum Commands {
         exclude_dirs: Option<Vec<String>>,
         
         /// Use file difference patches instead of storing full files (default: false)
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "true")]
         use_diff_patches: bool,
     },
 
