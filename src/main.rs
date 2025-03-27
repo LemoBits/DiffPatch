@@ -57,11 +57,9 @@ fn main() -> Result<()> {
             
             // Display if using diff patches
             if use_diff_patches {
-                println!("Using difference patches for modified files to reduce patch size");
             }
             
             // Create patch
-            println!("Comparing directories {} and {} using parallel processing", source.display(), target.display());
             let diffs = diff::compare_directories(&source, &target, exclude_extensions.as_deref(), exclude_dirs.as_deref(), use_diff_patches)?;
             
             if diffs.is_empty() {
