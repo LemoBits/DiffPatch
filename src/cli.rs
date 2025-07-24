@@ -1,7 +1,5 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-
-/// File Diff Extractor - Compare directories and create executable patches
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
@@ -36,7 +34,7 @@ pub enum Commands {
         /// Exclude directories (comma-separated relative paths, e.g., node_modules,dist,target)
         #[arg(long, value_name = "DIRECTORIES", value_delimiter = ',')]
         exclude_dirs: Option<Vec<String>>,
-        
+
         /// Use file difference patches instead of storing full files (default: false)
         #[arg(long, default_value = "true")]
         use_diff_patches: bool,
@@ -52,4 +50,4 @@ pub enum Commands {
 
 pub fn parse_args() -> Cli {
     Cli::parse()
-} 
+}
