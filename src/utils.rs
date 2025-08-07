@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use dialoguer::Confirm;
+use std::env;
 use std::path::Path;
 
 /// Check if path exists, return error if it doesn't
@@ -34,4 +35,18 @@ pub fn confirm_action(message: &str) -> Result<bool> {
         .default(false)
         .interact()
         .context("Failed to get user confirmation")
+}
+
+/// Get IO thread count from environment or use reasonable default
+pub fn get_io_thread_count() -> usize {
+    match env::var("DIFFPATCH_IO_THREADS") {
+        Ok(val) => val.parse().unwrap_or_else(|_| {
+            let cpus = num_cpus::get();
+            std::cmp::min(cpus, 4)
+        }),
+        Err(_) => {
+            let cpus = num_cpus::get();
+            std::cmp::min(cpus, 4)
+        }
+    }
 }

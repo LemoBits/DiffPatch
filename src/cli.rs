@@ -40,7 +40,7 @@ pub enum Commands {
         use_diff_patches: bool,
     },
 
-    /// Apply patch (typically called by the generated patch program)
+    #[command(hide = true)]
     Apply {
         /// Patch data file path
         #[arg(short, long, value_name = "FILE")]

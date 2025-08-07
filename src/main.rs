@@ -39,23 +39,21 @@ fn main() -> Result<()> {
             check_is_directory(&target).context("Target directory check failed")?;
 
             // Display exclude patterns if specified
-            if let Some(exts) = &exclude_extensions {
-                if !exts.is_empty() {
+            if let Some(exts) = &exclude_extensions
+                && !exts.is_empty() {
                     println!("Excluding file extensions:");
                     for ext in exts {
                         println!("  - {}", ext);
                     }
                 }
-            }
 
-            if let Some(dirs) = &exclude_dirs {
-                if !dirs.is_empty() {
+            if let Some(dirs) = &exclude_dirs
+                && !dirs.is_empty() {
                     println!("Excluding directories:");
                     for dir in dirs {
                         println!("  - {}", dir);
                     }
                 }
-            }
 
             // Display if using diff patches
             if use_diff_patches {
@@ -144,45 +142,37 @@ fn main() -> Result<()> {
 
 // Check if running as a patch executable
 fn is_patch_executable() -> bool {
-    // Check if the executable is large enough to contain the PATCH_END marker
-    // Check if the executable ends with the PATCH_END marker
-    match std::env::current_exe() {
-        Ok(exe_path) => {
-            match std::fs::File::open(&exe_path) {
-                Ok(mut file) => {
-                    use std::io::{Read, Seek, SeekFrom};
-                    // Check if file is large enough to contain the marker
-                    if file.metadata().map(|m| m.len() >= 9).unwrap_or(false) {
-                        // Seek to the position 9 bytes from the end
-                        if file.seek(SeekFrom::End(-9)).is_ok() {
-                            let mut buffer = [0u8; 9];
-                            // Read the last 9 bytes
-                            if file.read_exact(&mut buffer).is_ok() {
-                                // Compare with the marker
-                                return &buffer == b"PATCH_END";
-                            } else {
-                                // eprintln!("Warning: Failed to read end marker from executable.");
-                            }
-                        } else {
-                            // eprintln!("Warning: Failed to seek to end marker position in executable.");
-                        }
-                    } else {
-                        // eprintln!("Warning: Executable too small to contain end marker.");
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to open executable to check for patch marker: {}",
-                        e
-                    );
-                }
-            }
-            // If any check fails, assume it's not a patch executable
-            false
-        }
-        Err(e) => {
-            eprintln!("Warning: Failed to get current executable path: {}", e);
-            false
-        }
+    let Ok(exe_path) = std::env::current_exe() else {
+        eprintln!("Warning: Failed to get current executable path.");
+        return false;
+    };
+
+    let Ok(mut file) = std::fs::File::open(&exe_path) else {
+        eprintln!(
+            "Warning: Failed to open executable to check for patch marker: {}",
+            exe_path.display()
+        );
+        return false;
+    };
+
+    let Ok(metadata) = file.metadata() else {
+        eprintln!("Warning: Failed to read executable metadata.");
+        return false;
+    };
+
+    if metadata.len() < 9 {
+        return false;
     }
+
+    use std::io::{Read, Seek, SeekFrom};
+    if file.seek(SeekFrom::End(-9)).is_err() {
+        return false;
+    }
+
+    let mut buffer = [0u8; 9];
+    if file.read_exact(&mut buffer).is_err() {
+        return false;
+    }
+
+    &buffer == b"PATCH_END"
 }

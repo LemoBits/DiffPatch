@@ -1,29 +1,18 @@
 use crate::diff::{DiffChangeTag, DiffType, FileDiff, FileInfo};
+use crate::utils::get_io_thread_count;
 use anyhow::{Context, Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
-use zip::{ZipWriter, write::FileOptions};
+use zip::{write::FileOptions, ZipWriter};
 
-/// Get IO thread count from environment or use reasonable default
-fn get_io_thread_count() -> usize {
-    match env::var("DIFFPATCH_IO_THREADS") {
-        Ok(val) => val.parse().unwrap_or_else(|_| {
-            let cpus = num_cpus::get();
-            std::cmp::min(cpus, 4)
-        }),
-        Err(_) => {
-            let cpus = num_cpus::get();
-            std::cmp::min(cpus, 4)
-        }
-    }
-}
+type FileContents = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
 
 /// Patch data structure
 #[derive(Serialize, Deserialize, Debug)]
@@ -69,25 +58,13 @@ pub fn create_patch(
     diffs: Vec<DiffType>,
     check_files: Vec<String>,
 ) -> Result<()> {
-    // Modify output_file to be in the target directory
-    let output_filename = output_file
-        .file_name()
-        .ok_or_else(|| anyhow!("Invalid output filename"))?;
-
     // Check if output filename has .exe extension, if not, add it
-    let output_filename_str = output_filename.to_string_lossy();
-    let output_filename_with_exe = if !output_filename_str.ends_with(".exe") {
-        format!("{}.exe", output_filename_str)
-    } else {
-        output_filename_str.to_string()
-    };
+    let mut target_output_file = output_file.to_path_buf();
+    if target_output_file.extension().and_then(|s| s.to_str()) != Some("exe") {
+        target_output_file.set_extension("exe");
+    }
 
-    let target_output_file = target_dir.join(output_filename_with_exe);
-
-    println!(
-        "Creating patch file in target directory: {}",
-        target_output_file.display()
-    );
+    println!("Creating patch file: {}", target_output_file.display());
 
     // Create temporary directory to store patch data
     let temp_dir = tempdir().context("Failed to create temporary directory")?;
@@ -129,14 +106,13 @@ pub fn create_patch(
         let dest_file = content_dir.join(&file_info.relative_path);
 
         // Create target directory
-        if let Some(parent) = dest_file.parent() {
-            if let Err(_) = fs::create_dir_all(parent) {
+        if let Some(parent) = dest_file.parent()
+            && fs::create_dir_all(parent).is_err() {
                 return; // Skip this file on error
             }
-        }
 
         // Copy file
-        if let Err(_) = fs::copy(&source_file, &dest_file) {
+        if fs::copy(&source_file, &dest_file).is_err() {
             return; // Skip this file on error
         }
 
@@ -212,7 +188,7 @@ fn create_zip_archive(source_dir: &Path, zip_path: &Path) -> Result<()> {
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
         // Process files in parallel to prepare content
-        let file_contents: Arc<Mutex<Vec<(String, Vec<u8>)>>> =
+        let file_contents: FileContents =
             Arc::new(Mutex::new(Vec::with_capacity(files.len())));
         let progress_counter = Arc::new(Mutex::new(0));
 
@@ -478,13 +454,12 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
                 .with_context(|| format!("Failed to create directory: {}", outpath.display()))?;
         } else {
             // Create parent directory if needed
-            if let Some(parent) = outpath.parent() {
-                if !parent.exists() {
+            if let Some(parent) = outpath.parent()
+                && !parent.exists() {
                     fs::create_dir_all(parent).with_context(|| {
                         format!("Failed to create directory: {}", parent.display())
                     })?;
                 }
-            }
             // Extract file with buffered IO
             let mut outfile = BufWriter::with_capacity(
                 65536,
@@ -576,14 +551,13 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
                     }
                     DiffChangeTag::Replace => {
                         // Replace operation: delete first, then insert
-                        if let Some((start, len)) = change.old_range {
-                            if start < lines.len() {
+                        if let Some((start, len)) = change.old_range
+                            && start < lines.len() {
                                 let end = std::cmp::min(start + len, lines.len());
                                 lines.drain(start..end);
                             }
-                        }
-                        if let Some((start, _)) = change.new_range {
-                            if start <= lines.len() {
+                        if let Some((start, _)) = change.new_range
+                            && start <= lines.len() {
                                 let new_lines: Vec<String> =
                                     change.content.lines().map(|s| s.to_owned()).collect();
                                 for (i, line) in new_lines.into_iter().enumerate() {
@@ -592,7 +566,6 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -601,13 +574,12 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
             let new_content = lines.join("\n");
 
             // Write back to file
-            if let Ok(mut file) = File::create(&file_path) {
-                if file.write_all(new_content.as_bytes()).is_err() {
+            if let Ok(mut file) = File::create(&file_path)
+                && file.write_all(new_content.as_bytes()).is_err() {
                     // Skip on write error
                     diff_pb.inc(1);
                     continue;
                 }
-            }
 
             diff_pb.inc(1);
         }
@@ -653,13 +625,11 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
             let dest_path = current_dir.join(rel_path);
 
             // Ensure parent directory exists
-            if let Some(parent) = dest_path.parent() {
-                if !parent.exists() {
-                    if let Err(_) = fs::create_dir_all(parent) {
+            if let Some(parent) = dest_path.parent()
+                && !parent.exists()
+                    && fs::create_dir_all(parent).is_err() {
                         return; // Skip on error
                     }
-                }
-            }
 
             // Optimized copy with buffered IO
             let result = (|| {

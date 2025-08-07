@@ -1,32 +1,14 @@
+use crate::utils::get_io_thread_count;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use similar::TextDiff;
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-
-// Optional thread count control
-lazy_static::lazy_static! {
-    static ref IO_THREADS: usize = {
-        match env::var("DIFFPATCH_IO_THREADS") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                // Default to a reasonable number based on available CPUs
-                // For I/O bound operations, using too many threads can hurt performance
-                let cpus = num_cpus::get();
-                std::cmp::min(cpus, 4) // Limit to 4 or CPU count, whichever is smaller
-            }),
-            Err(_) => {
-                let cpus = num_cpus::get();
-                std::cmp::min(cpus, 4)
-            }
-        }
-    };
-}
 
 /// File information structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,32 +77,25 @@ fn should_exclude(
     exclude_dirs: Option<&[String]>,
 ) -> bool {
     // Check if path has an excluded extension
-    if let Some(extensions) = exclude_extensions {
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(extensions) = exclude_extensions
+        && let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let dot_ext = format!(".{}", ext);
             if extensions.iter().any(|e| e == &dot_ext || e == ext) {
                 return true;
             }
         }
-    }
 
-    // Check if path is in an excluded directory
+    // Check if the path is within an excluded directory
     if let Some(dirs) = exclude_dirs {
-        let path_str = path.display().to_string();
-        for dir in dirs {
-            // Convert dir string into platform-specific path format
-            let platform_dir = if cfg!(windows) {
-                dir.replace('/', "\\")
-            } else {
-                dir.replace('\\', "/")
-            };
+        let mut path_ancestors = path.ancestors();
+        // Skip the first ancestor, which is the path itself
+        path_ancestors.next();
 
-            // Check if path contains the excluded directory
-            if path_str.contains(&format!("{}{}", platform_dir, std::path::MAIN_SEPARATOR))
-                || path_str.ends_with(&platform_dir)
-            {
-                return true;
-            }
+        for ancestor in path_ancestors {
+            if let Some(dir_name) = ancestor.file_name().and_then(|n| n.to_str())
+                && dirs.iter().any(|excluded_dir| excluded_dir == dir_name) {
+                    return true;
+                }
         }
     }
 
@@ -163,7 +138,7 @@ pub fn scan_directory(
 
     // Create a thread pool with limited threads to avoid I/O contention
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(*IO_THREADS)
+        .num_threads(get_io_thread_count())
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
