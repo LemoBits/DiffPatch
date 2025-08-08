@@ -1,7 +1,8 @@
 use crate::diff::{DiffChangeTag, DiffType, FileDiff, FileInfo};
 use crate::utils::get_io_thread_count;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use log::{info, warn};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -72,7 +73,7 @@ pub fn create_patch(
         target_output_file.set_extension("exe");
     }
 
-    println!("Creating patch file: {}", target_output_file.display());
+    info!("Creating patch file: {}", target_output_file.display());
 
     // Create temporary directory to store patch data
     let temp_dir = tempdir().context("Failed to create temporary directory")?;
@@ -89,10 +90,11 @@ pub fn create_patch(
     // Copy added and modified files
     let pb =
         ProgressBar::new((patch_data.added_files.len() + patch_data.modified_files.len()) as u64);
+    pb.set_message("Copying files...");
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                "{spinner:.green} {msg:<25.bold.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -130,7 +132,8 @@ pub fn create_patch(
         pb.set_position(*counter);
     });
 
-    pb.finish_with_message("File copying complete");
+    pb.finish();
+    info!("File copying complete");
 
     // Create ZIP archive
     let zip_path = temp_dir.path().join("patch_content.zip");
@@ -151,12 +154,12 @@ pub fn create_patch(
     // Append patch data and content to the end of executable
     append_data_to_exe(&target_output_file, &patch_data_path, &zip_path)?;
 
-    println!("Patch file created successfully:");
-    println!("  Location: {}", target_output_file.display());
-    println!("File statistics:");
-    println!("  Added: {} files", patch_data.added_files.len());
-    println!("  Modified: {} files", patch_data.modified_files.len());
-    println!("  Deleted: {} files", patch_data.removed_files.len());
+    info!("Patch file created successfully:");
+    info!("  Location: {}", target_output_file.display());
+    info!("File statistics:");
+    info!("  Added: {} files", patch_data.added_files.len());
+    info!("  Modified: {} files", patch_data.modified_files.len());
+    info!("  Deleted: {} files", patch_data.removed_files.len());
 
     Ok(())
 }
@@ -178,12 +181,13 @@ fn create_zip_archive(source_dir: &Path, zip_path: &Path) -> Result<()> {
         .collect();
 
     if !files.is_empty() {
-        println!("Compressing {} files...", files.len());
+        info!("Compressing {} files...", files.len());
         let pb = ProgressBar::new(files.len() as u64);
+        pb.set_message("Compressing files...");
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                    "{spinner:.green} {msg:<25.bold.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
                 )
                 .unwrap()
                 .progress_chars("#>-"),
@@ -238,15 +242,17 @@ fn create_zip_archive(source_dir: &Path, zip_path: &Path) -> Result<()> {
             .into_inner()
             .unwrap();
 
-        pb.finish_with_message("File reading complete");
+        pb.finish();
+        info!("File reading complete");
 
         // Add files to the zip sequentially (ZipWriter is not thread-safe)
-        println!("Creating archive...");
+        info!("Creating archive...");
         let zip_pb = ProgressBar::new(contents.len() as u64);
+        zip_pb.set_message("Creating archive...");
         zip_pb.set_style(
             ProgressStyle::default_bar()
                 .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                    "{spinner:.green} {msg:<25.bold.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
                 )
                 .unwrap()
                 .progress_chars("#>-"),
@@ -262,7 +268,8 @@ fn create_zip_archive(source_dir: &Path, zip_path: &Path) -> Result<()> {
             zip_pb.set_position(i as u64 + 1);
         }
 
-        zip_pb.finish_with_message("Archive creation complete");
+        zip_pb.finish();
+        info!("Archive creation complete");
     }
 
     zip.finish().context("Failed to finish zip file")?;
@@ -321,7 +328,7 @@ pub fn verify_directory(check_files: &[String], current_dir: &Path) -> Result<bo
     for file in check_files {
         let file_path = current_dir.join(file);
         if !file_path.exists() {
-            println!("Verification file not found: {}", file_path.display());
+            warn!("Verification file not found: {}", file_path.display());
             return Ok(false);
         }
     }
@@ -390,22 +397,22 @@ pub fn extract_patch_data_from_exe() -> Result<(PatchData, Vec<u8>)> {
 
 /// Apply patch to current directory
 pub fn apply_patch(current_dir: &Path) -> Result<()> {
-    println!("Applying patch to directory: {}", current_dir.display());
+    info!("Applying patch to directory: {}", current_dir.display());
 
     // Extract patch data and content
     let (patch_data, content_bytes) = extract_patch_data_from_exe()?;
 
     // Verify if patch should be applied to this directory
     if !patch_data.check_files.is_empty() {
-        println!("Verifying directory...");
+        info!("Verifying directory...");
         if !verify_directory(&patch_data.check_files, current_dir)? {
             return Err(anyhow!(
                 "Directory verification failed. This patch cannot be applied here."
             ));
         }
-        println!("Directory verification successful.");
+        info!("Directory verification successful.");
     } else {
-        println!("Warning: No verification files specified. Applying patch without verification.");
+        warn!("No verification files specified. Applying patch without verification.");
         if !dialoguer::Confirm::new()
             .with_prompt("Continue with patch application?")
             .default(false)
@@ -428,12 +435,13 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(file).context("Failed to read zip archive")?;
 
     // Process files
-    println!("Processing {} files...", archive.len());
+    info!("Processing {} files...", archive.len());
     let pb = ProgressBar::new(archive.len() as u64);
+    pb.set_message("Extracting files...");
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                "{spinner:.green} {msg:<25.bold.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -481,16 +489,18 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
         pb.inc(1);
     }
 
-    pb.finish_with_message("Files extracted successfully");
+    pb.finish();
+    info!("Files extracted successfully");
 
     // Process diff patch files
     if !patch_data.modified_diffs.is_empty() {
-        println!("Applying {} file diffs...", patch_data.modified_diffs.len());
+        info!("Applying {} file diffs...", patch_data.modified_diffs.len());
         let diff_pb = ProgressBar::new(patch_data.modified_diffs.len() as u64);
+        diff_pb.set_message("Applying diffs...");
         diff_pb.set_style(
             ProgressStyle::default_bar()
                 .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                    "{spinner:.green} {msg:<25.bold.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
                 )
                 .unwrap()
                 .progress_chars("#>-"),
@@ -592,7 +602,8 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
             diff_pb.inc(1);
         }
 
-        diff_pb.finish_with_message("File diffs applied successfully");
+        diff_pb.finish();
+        info!("File diffs applied successfully");
     }
 
     // Now copy files in parallel from the temporary directory to the target directory
@@ -602,15 +613,16 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
         .filter(|e| e.file_type().is_file())
         .collect();
 
-    println!(
+    info!(
         "Copying {} files to target directory...",
         extracted_files.len()
     );
     let copy_pb = ProgressBar::new(extracted_files.len() as u64);
+    copy_pb.set_message("Copying files...");
     copy_pb.set_style(
         ProgressStyle::default_bar()
             .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                "{spinner:.green} {msg:<25.bold.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -663,11 +675,12 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
         });
     });
 
-    copy_pb.finish_with_message("Files copied successfully");
+    copy_pb.finish();
+    info!("Files copied successfully");
 
     // Remove files to be deleted in parallel
     if !patch_data.removed_files.is_empty() {
-        println!("Removing {} files...", patch_data.removed_files.len());
+        info!("Removing {} files...", patch_data.removed_files.len());
 
         // Use same thread pool for deletion
         pool.install(|| {
@@ -679,21 +692,21 @@ pub fn apply_patch(current_dir: &Path) -> Result<()> {
             });
         });
 
-        println!("Files removed successfully");
+        info!("Files removed successfully");
     }
 
-    println!("Patch applied successfully!");
-    println!("Summary:");
-    println!("  Added files: {}", patch_data.added_files.len());
-    println!(
+    info!("Patch applied successfully!");
+    info!("Summary:");
+    info!("  Added files: {}", patch_data.added_files.len());
+    info!(
         "  Modified files (full): {}",
         patch_data.modified_files.len()
     );
-    println!(
+    info!(
         "  Modified files (diff): {}",
         patch_data.modified_diffs.len()
     );
-    println!("  Removed files: {}", patch_data.removed_files.len());
+    info!("  Removed files: {}", patch_data.removed_files.len());
 
     Ok(())
 }

@@ -1,5 +1,6 @@
 use crate::utils::get_io_thread_count;
 use anyhow::{Context, Result};
+use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -301,10 +302,10 @@ pub fn compare_directories(
     exclude_dirs: Option<&[String]>,
     use_diff_patches: bool, // Add parameter to control whether to use diff patches
 ) -> Result<Vec<DiffType>> {
-    println!("Scanning source directory: {}", source_dir.display());
+    info!("Scanning source directory: {}", source_dir.display());
     let source_files = scan_directory(source_dir, exclude_extensions, exclude_dirs)?;
 
-    println!("Scanning target directory: {}", target_dir.display());
+    info!("Scanning target directory: {}", target_dir.display());
     let target_files = scan_directory(target_dir, exclude_extensions, exclude_dirs)?;
 
     let mut diffs = Vec::new();
