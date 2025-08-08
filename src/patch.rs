@@ -52,14 +52,22 @@ impl PatchData {
 
 /// Create a patch file
 pub fn create_patch(
-    _source_dir: &Path,
+    source_dir: &Path,
     target_dir: &Path,
     output_file: &Path,
     diffs: Vec<DiffType>,
     check_files: Vec<String>,
 ) -> Result<()> {
-    // Check if output filename has .exe extension, if not, add it
-    let mut target_output_file = output_file.to_path_buf();
+    // Determine the final output path.
+    // If output_file is just a filename, it will be placed in the source directory.
+    // Otherwise, it will be created at the specified path.
+    let mut target_output_file = if output_file.components().count() == 1 {
+        source_dir.join(output_file)
+    } else {
+        output_file.to_path_buf()
+    };
+
+    // Ensure the output file has a .exe extension
     if target_output_file.extension().and_then(|s| s.to_str()) != Some("exe") {
         target_output_file.set_extension("exe");
     }
